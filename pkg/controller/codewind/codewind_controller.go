@@ -173,7 +173,6 @@ func (r *ReconcileCodewind) Reconcile(request reconcile.Request) (reconcile.Resu
 	storageClassDef := &storagev1.StorageClass{}
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: defaults.ROKSStorageClass, Namespace: ""}, storageClassDef)
 	if err == nil {
-		reqLogger.Info("Using storageclass", "name", defaults.ROKSStorageClass)
 		storageClassName = defaults.ROKSStorageClass
 	}
 
@@ -308,6 +307,31 @@ func (r *ReconcileCodewind) Reconcile(request reconcile.Request) (reconcile.Resu
 	} else if err != nil {
 		reqLogger.Error(err, "Failed to get PFE PVC.")
 		return reconcile.Result{}, err
+	}
+
+	// Fetch the PV being used by the PVC
+	codewindPVName := codewindPVC.Spec.VolumeName
+	if codewindPVName == "" {
+		reqLogger.Info("Codewind PV not ready", "Namespace", codewindPVC.Namespace, "PVC Name", codewindPVC.Name)
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	codewindPV := &corev1.PersistentVolume{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: codewindPVName, Namespace: ""}, codewindPV)
+	if err != nil && k8serr.IsNotFound(err) {
+		reqLogger.Error(err, "Unable to find PV", "Namespace", codewind.Namespace, "PV Name", codewindPVName)
+		return reconcile.Result{RequeueAfter: time.Second * 10}, err
+	}
+
+	// Patch the PV if needed
+	if codewindPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRecycle {
+		patch := client.MergeFrom(codewindPV.DeepCopy())
+		codewindPV.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRecycle
+		if err := r.client.Patch(context.TODO(), codewindPV, patch); err != nil {
+			reqLogger.Error(err, "Unable to patch PV", "Namespace", codewind.Namespace, "Name", codewindPVName)
+			return reconcile.Result{}, err
+		}
+		reqLogger.Info("Codewind PV patched", "Name", codewindPVName)
 	}
 
 	keycloakPod, err := r.getKeycloakPod(reqLogger, request, codewind.Spec.KeycloakDeployment)
